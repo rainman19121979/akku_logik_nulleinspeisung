@@ -1,0 +1,351 @@
+blueprint:
+  name: "Akku-Logik & Nulleinspeisung – Spread + sanft (fixe Hysterese, Rampenlimit nur Entladen)"
+  description: >
+    Lädt nur, wenn (Tagesmaximum - Tagesminimum) >= required_spread_eur.
+    Max-SoC ist wählbar, Hysterese fix (Band 5 %-Punkte).
+    Nulleinspeisung regelt sanft (Deadband 30–60 W, Offset 15 W) mit optionaler Rampenbegrenzung
+    NUR fürs Entladen. Laden setzt immer sofort die eingestellte Leistung.
+    POSITIV = Netzbezug, NEGATIV = Einspeisung. Lade-/Entlade-Limits wählbar (max 1200/800 W).
+  domain: automation
+
+  input:
+    sel_mode:
+      name: "AC-Modus (Select)"
+      description: >
+        Select-Entity deines Wechselrichters/Akkus zur Umschaltung des AC-Modus.
+        Erwartete Optionen: "input" (Laden) und "output" (Entladen/Versorgen).
+        Beispiel (Hyper 2000): select.hyper_2000_ac_mode
+      selector:
+        entity:
+          domain: select
+
+    input_limit:
+      name: "Ladeleistungs-Limit (Number)"
+      description: >
+        Number-Entity, mit der die maximale AC-Ladeleistung (W) vorgegeben wird.
+        Dieser Wert wird beim Start des Ladens sofort gesetzt (keine Rampe).
+        Beispiel (Hyper 2000): number.hyper_2000_input_limit
+      selector:
+        entity:
+          domain: number
+
+    output_limit:
+      name: "Entladeleistungs-Limit (Number)"
+      description: >
+        Number-Entity, mit der die maximale AC-Entladeleistung (W) vorgegeben wird.
+        Dieser Wert wird alle 20 s fein nachgeregelt (mit optionaler Rampe).
+        Beispiel (Hyper 2000): number.hyper_2000_output_limit
+      selector:
+        entity:
+          domain: number
+
+    soc:
+      name: "SoC (Sensor)"
+      description: >
+        Ladezustand der Batterie in Prozent (0–100). Wird zur Hysterese genutzt:
+        Laden startet unter (max_soc - 5 %) und stoppt ab max_soc.
+        Beispiel (Hyper 2000): sensor.hyper_2000_electric_level
+      selector:
+        entity:
+          domain: sensor
+          device_class: battery
+
+    pack_input:
+      name: "Akku-Output (Sensor, W)"
+      description: >
+        Aktuelle AC-Ausgangsleistung des Akkus in Watt. Positiv bedeutet,
+        der Akku liefert Leistung. Dient als Ausgangspunkt für die sanfte Regelung.
+        Beispiel (Hyper 2000): sensor.hyper_2000_pack_input_power
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    grid_inout:
+      name: "Netz In/Out (Sensor, W)"
+      description: >
+        Leistung am Netzanschlusspunkt in Watt. Wichtig: POSITIV = Netzbezug,
+        NEGATIV = Einspeisung. Die Regelung hält einen kleinen Netzbezug.
+        Beispiel: sensor.sensor_tibber_inout
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    preis_laden:
+      name: "Preis: Laden erlaubt (Binary Sensor)"
+      description: >
+        Boolescher Freigabesensor für Laden (z. B. von deinem dynamischen Anbieter
+        oder eigener Logik). "on" => Laden grundsätzlich erlaubt.
+        Zusätzlich greift der Spread-Guard und die SoC-Hysterese.
+        Beispiel: binary_sensor.preis_akku_laden
+      selector:
+        entity:
+          domain: binary_sensor
+
+    preis_entladen:
+      name: "Preis: Entladen erlaubt (Binary Sensor)"
+      description: >
+        Boolescher Freigabesensor für Entladen. "on" => Nulleinspeisungs-Regelung aktiv.
+        Beispiel: binary_sensor.preis_akku_entladen
+      selector:
+        entity:
+          domain: binary_sensor
+
+    price_lowest:
+      name: "EPEX Tagesminimum (€/kWh)"
+      description: >
+        Sensor mit dem niedrigsten Tagespreis (€/kWh). Wird für den Spread-Guard genutzt.
+        Beispiel: sensor.epex_spot_data_lowest_price
+      selector:
+        entity:
+          domain: sensor
+
+    price_highest:
+      name: "EPEX Tagesmaximum (€/kWh)"
+      description: >
+        Sensor mit dem höchsten Tagespreis (€/kWh). Wird für den Spread-Guard genutzt.
+        Beispiel: sensor.epex_spot_data_highest_price
+      selector:
+        entity:
+          domain: sensor
+
+    max_soc:
+      name: "Maximaler SoC (%) – bis hier wird geladen"
+      description: >
+        Oberes Ladeziel in %. Hysterese ist fix: Laden startet unter (max_soc - 5 %)
+        und stoppt ab max_soc. Beispiel: 80 (%).
+      default: 80
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    required_spread_eur:
+      name: "Erforderliche Tages-Preisspanne (€/kWh)"
+      description: >
+        Spread-Guard: Nur wenn (Tagesmaximum - Tagesminimum) mindestens so groß ist,
+        wird Laden freigegeben (zusätzlich zu preis_laden=on und der SoC-Hysterese).
+        Beispiel: 0.10 €/kWh.
+      default: 0.10
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.001
+          unit_of_measurement: "€/kWh"
+
+    max_charge_w:
+      name: "Maximale Ladeleistung (W)"
+      description: >
+        Ziel-Ladeleistung, die beim Umschalten auf "input" sofort gesetzt wird.
+        Eingabe 0–1200 W; intern wird hart auf 1200 W gedeckelt.
+      default: 1200
+      selector:
+        number:
+          min: 0
+          max: 1200
+          step: 10
+          unit_of_measurement: "W"
+
+    max_discharge_w:
+      name: "Maximale Entladeleistung (W)"
+      description: >
+        Obergrenze für die Nulleinspeisungs-Regelung. Eingabe 0–800 W;
+        intern wird hart auf 800 W gedeckelt.
+      default: 800
+      selector:
+        number:
+          min: 0
+          max: 800
+          step: 10
+          unit_of_measurement: "W"
+
+    enable_ramp:
+      name: "Rampenbegrenzung (Entladen) aktiv"
+      description: >
+        Wenn aktiv, wird die Stellgröße fürs Entladen pro 20-s-Schritt
+        maximal um "ramp_w_per_step" verändert (schont WR/Batterie).
+      default: true
+      selector:
+        boolean: {}
+
+    ramp_w_per_step:
+      name: "Max. Änderung pro Schritt (W) fürs Entladen"
+      description: >
+        Gilt pro 20-Sekunden-Intervall und nur, wenn die Rampenbegrenzung aktiv ist.
+        Typische Werte: 50–150 W.
+      default: 100
+      selector:
+        number:
+          min: 10
+          max: 500
+          step: 10
+          unit_of_measurement: "W"
+
+mode: restart
+
+variables:
+  sel_mode: !input sel_mode
+  input_limit: !input input_limit
+  output_limit: !input output_limit
+  soc: !input soc
+  pack_input: !input pack_input
+  grid_inout: !input grid_inout
+  preis_laden: !input preis_laden
+  preis_entladen: !input preis_entladen
+
+  price_lowest: !input price_lowest
+  price_highest: !input price_highest
+
+  max_soc: !input max_soc
+  hysteresis_band_pct: 5
+  required_spread_eur: !input required_spread_eur
+
+  max_charge_w: !input max_charge_w
+  max_discharge_w: !input max_discharge_w
+
+  # Sanftes Regeln (wie besprochen)
+  deadband_low_w: 30
+  deadband_high_w: 60
+  offset_w: 15
+  min_output_w: 30
+
+  # Rampe nur fürs Entladen
+  enable_ramp: !input enable_ramp
+  ramp_w_per_step: !input ramp_w_per_step
+
+trigger:
+  - platform: time_pattern
+    seconds: "/20"
+
+  - platform: state
+    entity_id: !input preis_laden
+  - platform: state
+    entity_id: !input preis_entladen
+  - platform: state
+    entity_id: !input price_lowest
+  - platform: state
+    entity_id: !input price_highest
+
+action:
+  # 1) Modus-Steuerung: fixe Hysterese + Spread-Guard
+  - variables:
+      soc_val: "{{ states(soc) | float(0) }}"
+      start_soc: "{{ (max_soc | float(0)) - (hysteresis_band_pct | float(0)) }}"
+      high_price: "{{ states(price_highest) | float(0) }}"
+      low_price: "{{ states(price_lowest) | float(0) }}"
+      spread_ok: "{{ (high_price - low_price) >= (required_spread_eur | float(0)) }}"
+
+  - choose:
+      # -> OUTPUT erzwingen, wenn Preis-Laden AUS ODER SoC >= max_soc ODER Spread nicht erfüllt
+      - conditions:
+          - condition: or
+            conditions:
+              - condition: state
+                entity_id: !input preis_laden
+                state: "off"
+              - condition: template
+                value_template: "{{ soc_val >= (max_soc | float(0)) }}"
+              - condition: template
+                value_template: "{{ not (spread_ok | bool) }}"
+        sequence:
+          - service: select.select_option
+            target:
+              entity_id: !input sel_mode
+            data:
+              option: output
+
+      # -> INPUT aktivieren, wenn Preis-Laden AN UND SoC < (max_soc - Band) UND Spread erfüllt
+      - conditions:
+          - condition: state
+            entity_id: !input preis_laden
+            state: "on"
+          - condition: template
+            value_template: "{{ soc_val < (start_soc | float(0)) }}"
+          - condition: template
+            value_template: "{{ spread_ok | bool }}"
+        sequence:
+          - service: select.select_option
+            target:
+              entity_id: !input sel_mode
+            data:
+              option: input
+          # Laden: SOFORT auf die gewählte Leistung (keine Rampe), Hard-Guard ≤ 1200
+          - service: number.set_value
+            target:
+              entity_id: !input input_limit
+            data:
+              value: >-
+                {% set v = max_charge_w | float(0) %}
+                {{ [ v, 1200 ] | min }}
+
+  # 2) Nulleinspeisung – sanft, mit optionaler Rampe (nur Output, Entladen erlaubt)
+  - if:
+      - condition: state
+        entity_id: !input preis_entladen
+        state: "on"
+      - condition: state
+        entity_id: !input preis_laden
+        state: "off"
+      - condition: state
+        entity_id: !input sel_mode
+        state: "output"
+      - condition: numeric_state
+        entity_id: !input soc
+        above: 10
+    then:
+      - variables:
+          # Messwerte
+          consumption: "{{ states(grid_inout) | float(0) }}"
+          current_output: "{{ states(pack_input) | float(0) }}"
+
+          # Weiches Regelschema (Deadband 30–60 W, Offset 15 W)
+          raw_desired: >-
+            {% if 30 < consumption < 60 %}
+              {{ current_output }}
+            {% else %}
+              {{ current_output + consumption - 15 }}
+            {% endif %}
+
+          # Klemmen (min 30 W, max = max_discharge_w, hart gedeckelt auf 800 W)
+          desired_clamped: >-
+            {% set hard_max = [ max_discharge_w | float(0), 800 ] | min %}
+            {% set floored  = (raw_desired | float(0)) | round(0, 'floor') %}
+            {% set capped   = [ floored, hard_max ] | min %}
+            {{ [ capped, min_output_w ] | max }}
+
+          # --- Rampenbegrenzung NUR fürs Entladen ---
+          prev_limit: >-
+            {% set s = states(output_limit) %}
+            {% if s in ['unknown','unavailable','none'] %}
+              0
+            {% else %}
+              {{ s | float(0) }}
+            {% endif %}
+          ramp_step: >-
+            {% if enable_ramp %}{{ ramp_w_per_step | float(0) }}{% else %}999999{% endif %}
+          diff: "{{ (desired_clamped | float(0)) - (prev_limit | float(0)) }}"
+          ramped_value: >-
+            {% set step = ramp_step | float(0) %}
+            {% if diff > step %}
+              {{ (prev_limit | float(0)) + step }}
+            {% elif diff < -step %}
+              {{ (prev_limit | float(0)) - step }}
+            {% else %}
+              {{ desired_clamped }}
+            {% endif %}
+
+      - service: number.set_value
+        target:
+          entity_id: !input output_limit
+        data:
+          value: "{{ ramped_value }}"
+    else:
+      - service: number.set_value
+        target:
+          entity_id: !input output_limit
+        data:
+          value: 0
