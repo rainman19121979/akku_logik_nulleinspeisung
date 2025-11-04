@@ -1,7 +1,8 @@
 blueprint:
-  name: "Akku-Logik & Nulleinspeisung – Spread + sanft (fixe Hysterese, Rampenlimit nur Entladen)"
+  name: "Akku-Logik & Nulleinspeisung – Spread + absoluter Preis (fixe Hysterese, Rampenlimit nur Entladen)"
   description: >
-    Lädt nur, wenn (Tagesmaximum - Tagesminimum) >= required_spread_eur.
+    Lädt wenn (Tagesmaximum - Tagesminimum) >= required_spread_eur ODER aktueller Preis <= max_charge_price.
+    So wird auch bei geringen Tagesschwankungen in günstigen Stunden geladen.
     Max-SoC ist wählbar, Hysterese fix (Band 5 %-Punkte).
     Nulleinspeisung regelt sanft (Deadband 30–60 W, Offset 15 W) mit optionaler Rampenbegrenzung
     NUR fürs Entladen. Laden setzt immer sofort die eingestellte Leistung.
@@ -110,6 +111,30 @@ blueprint:
         entity:
           domain: sensor
 
+    current_price:
+      name: "Aktueller Strompreis (€/kWh)"
+      description: >
+        Sensor mit dem aktuellen Strompreis (€/kWh). Wird für den absoluten Preis-Check genutzt.
+        Beispiel: sensor.epex_spot_data_current_price oder sensor.tibber_prices
+      selector:
+        entity:
+          domain: sensor
+
+    max_charge_price:
+      name: "Max. Preis zum Laden (€/kWh)"
+      description: >
+        Absoluter Preisschwellenwert: Laden wird erlaubt, wenn der aktuelle Preis
+        darunter liegt - auch bei geringem Tages-Spread. So wird bei durchgehend
+        niedrigen Preisen in den günstigsten Stunden geladen.
+        Beispiel: 0.10 €/kWh. Auf 9999 setzen zum Deaktivieren.
+      default: 0.10
+      selector:
+        number:
+          min: -1
+          max: 9999
+          step: 0.001
+          unit_of_measurement: "€/kWh"
+
     max_soc:
       name: "Maximaler SoC (%) – bis hier wird geladen"
       description: >
@@ -126,8 +151,9 @@ blueprint:
     required_spread_eur:
       name: "Erforderliche Tages-Preisspanne (€/kWh)"
       description: >
-        Spread-Guard: Nur wenn (Tagesmaximum - Tagesminimum) mindestens so groß ist,
-        wird Laden freigegeben (zusätzlich zu preis_laden=on und der SoC-Hysterese).
+        Spread-Guard: Wenn (Tagesmaximum - Tagesminimum) mindestens so groß ist,
+        wird Laden freigegeben. Alternativ greift der absolute Preis-Check (max_charge_price).
+        Beide Bedingungen werden mit ODER verknüpft.
         Beispiel: 0.10 €/kWh.
       default: 0.10
       selector:
@@ -199,6 +225,8 @@ variables:
 
   price_lowest: !input price_lowest
   price_highest: !input price_highest
+  current_price: !input current_price
+  max_charge_price: !input max_charge_price
 
   max_soc: !input max_soc
   hysteresis_band_pct: 5
@@ -229,17 +257,21 @@ trigger:
     entity_id: !input price_lowest
   - platform: state
     entity_id: !input price_highest
+  - platform: state
+    entity_id: !input current_price
 
 action:
-  # 1) Modus-Steuerung: fixe Hysterese + Spread-Guard
+  # 1) Modus-Steuerung: fixe Hysterese + Spread-Guard + absoluter Preischeck
   - variables:
       soc_val: "{{ states(soc) | float(0) }}"
       start_soc: "{{ max_soc - hysteresis_band_pct }}"
       spread: "{{ states(price_highest) | float(0) - states(price_lowest) | float(0) }}"
       spread_ok: "{{ spread >= required_spread_eur }}"
+      cur_price: "{{ states(current_price) | float(9999) }}"
+      price_ok: "{{ spread_ok or cur_price <= max_charge_price }}"
 
   - choose:
-      # -> OUTPUT erzwingen, wenn Preis-Laden AUS ODER SoC >= max_soc ODER Spread nicht erfüllt
+      # -> OUTPUT erzwingen, wenn Preis-Laden AUS ODER SoC >= max_soc ODER Preis-Check nicht erfüllt
       - conditions:
           - condition: or
             conditions:
@@ -249,7 +281,7 @@ action:
               - condition: template
                 value_template: "{{ soc_val >= max_soc }}"
               - condition: template
-                value_template: "{{ not spread_ok }}"
+                value_template: "{{ not price_ok }}"
         sequence:
           - service: select.select_option
             target:
@@ -257,7 +289,7 @@ action:
             data:
               option: output
 
-      # -> INPUT aktivieren, wenn Preis-Laden AN UND SoC < (max_soc - Band) UND Spread erfüllt
+      # -> INPUT aktivieren, wenn Preis-Laden AN UND SoC < (max_soc - Band) UND Preis-Check erfüllt
       - conditions:
           - condition: state
             entity_id: !input preis_laden
@@ -265,7 +297,7 @@ action:
           - condition: template
             value_template: "{{ soc_val < start_soc }}"
           - condition: template
-            value_template: "{{ spread_ok }}"
+            value_template: "{{ price_ok }}"
         sequence:
           - service: select.select_option
             target:
