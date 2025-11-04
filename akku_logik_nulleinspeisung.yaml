@@ -234,10 +234,9 @@ action:
   # 1) Modus-Steuerung: fixe Hysterese + Spread-Guard
   - variables:
       soc_val: "{{ states(soc) | float(0) }}"
-      start_soc: "{{ (max_soc | float(0)) - (hysteresis_band_pct | float(0)) }}"
-      high_price: "{{ states(price_highest) | float(0) }}"
-      low_price: "{{ states(price_lowest) | float(0) }}"
-      spread_ok: "{{ (high_price - low_price) >= (required_spread_eur | float(0)) }}"
+      start_soc: "{{ max_soc - hysteresis_band_pct }}"
+      spread: "{{ states(price_highest) | float(0) - states(price_lowest) | float(0) }}"
+      spread_ok: "{{ spread >= required_spread_eur }}"
 
   - choose:
       # -> OUTPUT erzwingen, wenn Preis-Laden AUS ODER SoC >= max_soc ODER Spread nicht erfüllt
@@ -248,9 +247,9 @@ action:
                 entity_id: !input preis_laden
                 state: "off"
               - condition: template
-                value_template: "{{ soc_val >= (max_soc | float(0)) }}"
+                value_template: "{{ soc_val >= max_soc }}"
               - condition: template
-                value_template: "{{ not (spread_ok | bool) }}"
+                value_template: "{{ not spread_ok }}"
         sequence:
           - service: select.select_option
             target:
@@ -264,9 +263,9 @@ action:
             entity_id: !input preis_laden
             state: "on"
           - condition: template
-            value_template: "{{ soc_val < (start_soc | float(0)) }}"
+            value_template: "{{ soc_val < start_soc }}"
           - condition: template
-            value_template: "{{ spread_ok | bool }}"
+            value_template: "{{ spread_ok }}"
         sequence:
           - service: select.select_option
             target:
@@ -278,9 +277,7 @@ action:
             target:
               entity_id: !input input_limit
             data:
-              value: >-
-                {% set v = max_charge_w | float(0) %}
-                {{ [ v, 1200 ] | min }}
+              value: "{{ [max_charge_w, 1200] | min }}"
 
   # 2) Nulleinspeisung – sanft, mit optionaler Rampe (nur Output, Entladen erlaubt)
   - if:
@@ -303,40 +300,16 @@ action:
           current_output: "{{ states(pack_input) | float(0) }}"
 
           # Weiches Regelschema (Deadband 30–60 W, Offset 15 W)
-          raw_desired: >-
-            {% if 30 < consumption < 60 %}
-              {{ current_output }}
-            {% else %}
-              {{ current_output + consumption - 15 }}
-            {% endif %}
+          raw_desired: "{{ current_output if 30 < consumption < 60 else current_output + consumption - offset_w }}"
 
           # Klemmen (min 30 W, max = max_discharge_w, hart gedeckelt auf 800 W)
-          desired_clamped: >-
-            {% set hard_max = [ max_discharge_w | float(0), 800 ] | min %}
-            {% set floored  = (raw_desired | float(0)) | round(0, 'floor') %}
-            {% set capped   = [ floored, hard_max ] | min %}
-            {{ [ capped, min_output_w ] | max }}
+          desired_clamped: "{{ [[raw_desired | round(0, 'floor'), [max_discharge_w, 800] | min] | min, min_output_w] | max }}"
 
           # --- Rampenbegrenzung NUR fürs Entladen ---
-          prev_limit: >-
-            {% set s = states(output_limit) %}
-            {% if s in ['unknown','unavailable','none'] %}
-              0
-            {% else %}
-              {{ s | float(0) }}
-            {% endif %}
-          ramp_step: >-
-            {% if enable_ramp %}{{ ramp_w_per_step | float(0) }}{% else %}999999{% endif %}
-          diff: "{{ (desired_clamped | float(0)) - (prev_limit | float(0)) }}"
-          ramped_value: >-
-            {% set step = ramp_step | float(0) %}
-            {% if diff > step %}
-              {{ (prev_limit | float(0)) + step }}
-            {% elif diff < -step %}
-              {{ (prev_limit | float(0)) - step }}
-            {% else %}
-              {{ desired_clamped }}
-            {% endif %}
+          prev_limit: "{{ states(output_limit) | float(0) if states(output_limit) not in ['unknown','unavailable','none'] else 0 }}"
+          ramp_step: "{{ ramp_w_per_step if enable_ramp else 999999 }}"
+          diff: "{{ desired_clamped - prev_limit }}"
+          ramped_value: "{{ prev_limit + ramp_step if diff > ramp_step else (prev_limit - ramp_step if diff < -ramp_step else desired_clamped) }}"
 
       - service: number.set_value
         target:
